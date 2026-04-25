@@ -770,13 +770,33 @@
 <script>
 // ─── WEB WORKER via Blob ───
 const workerCode = `
-  // Multiple public Cobalt instances — tried in order until one succeeds
-  const COBALT_INSTANCES = [
-    'https://api.cobalt.tools/',
-    'https://cobalt.synzr.space/',
-    'https://cobalt.canine.tools/',
-    'https://cobalt.api.onrender.com/',
+  // Fallback instances if dynamic fetch fails
+  const FALLBACK_INSTANCES = [
+    'https://co.wuk.sh/',
+    'https://cobalt.api.lolcat.host/',
+    'https://cobalt.esmailelbob.xyz/',
+    'https://cobalt.semoths.net/',
+    'https://cobalt.lunar.icu/',
   ];
+
+  // Fetch fresh working instances from community list
+  async function fetchInstances() {
+    try {
+      // Use allorigins proxy to bypass user-agent restriction on instances.cobalt.best
+      const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://instances.cobalt.best/api/instances.json');
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+      if (!res.ok) throw new Error('proxy failed');
+      const list = await res.json();
+      // Filter: online, no auth, cors enabled
+      const good = list
+        .filter(i => i.online && i.info && i.info.auth === false && i.info.cors === true)
+        .sort((a, b) => (b.score || 0) - (a.score || 0))
+        .slice(0, 6)
+        .map(i => i.protocol + '://' + i.api + '/');
+      if (good.length > 0) return good;
+    } catch (_) {}
+    return FALLBACK_INSTANCES;
+  }
 
   async function tryCobalt(instances, body) {
     let lastErr = null;
@@ -789,11 +809,16 @@ const workerCode = `
             'Accept': 'application/json',
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(12000),
         });
         if (res.status === 400 || res.status === 422) {
           const t = await res.text();
           lastErr = 'Error ' + res.status + ' from ' + base + ': ' + t.slice(0, 120);
           continue; // try next instance
+        }
+        if (res.status === 401 || res.status === 403) {
+          lastErr = 'Instance requires authentication: ' + base;
+          continue; // skip auth-required instances
         }
         return res; // return any other response (200, 500, etc.) for caller to handle
       } catch (e) {
@@ -837,10 +862,14 @@ const workerCode = `
       body.audioBitrate = '320';
     }
 
+    self.postMessage({ type: 'progress', msg: 'Finding available servers...' });
+
+    const instances = await fetchInstances();
+
     self.postMessage({ type: 'progress', msg: 'Contacting download service...' });
 
     try {
-      const res = await tryCobalt(COBALT_INSTANCES, body);
+      const res = await tryCobalt(instances, body);
 
       if (!res.ok) {
         let errMsg = 'Service returned error ' + res.status + '.';
