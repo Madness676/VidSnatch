@@ -666,7 +666,10 @@
 
   <!-- Input card -->
   <div class="input-card">
-    <span class="input-label">🔗 Paste video URL</span>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:14px;">
+      <span class="input-label" style="margin-bottom:0">🔗 Paste video URL</span>
+      <button onclick="document.getElementById('instanceWrap').classList.toggle('hidden')" style="background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;font-size:0.7rem;color:var(--text-dim);cursor:pointer;font-family:'DM Mono',monospace;transition:all 0.2s" onmouseover="this.style.borderColor='var(--border-bright)'" onmouseout="this.style.borderColor='var(--border)'">⚙ custom server</button>
+    </div>
     <div class="input-row">
       <input
         class="url-input"
@@ -716,6 +719,23 @@
         </label>
         <span class="option-label">No watermark</span>
       </div>
+    </div>
+
+    <!-- Custom instance (hidden until needed) -->
+    <div id="instanceWrap" class="hidden" style="margin-top:16px; border-top:1px solid var(--border); padding-top:16px;">
+      <span class="input-label" style="margin-bottom:8px; display:block;">🔧 Custom Cobalt Instance <span style="font-size:0.7rem; opacity:0.6; text-transform:none; letter-spacing:0">(optional)</span></span>
+      <input
+        id="customInstance"
+        class="url-input"
+        type="url"
+        placeholder="https://your-cobalt-instance.example.com/"
+        autocomplete="off"
+        spellcheck="false"
+        style="width:100%; font-size:0.82rem;"
+      />
+      <p style="font-size:0.72rem; color:var(--text-dim); font-family:'DM Mono',monospace; margin-top:8px; line-height:1.5;">
+        Public servers are often rate-limited. <a href="https://github.com/imputnet/cobalt/blob/main/docs/run-an-instance.md" target="_blank" style="color:var(--cyan)">Host a free instance on Railway →</a>
+      </p>
     </div>
   </div>
 
@@ -770,31 +790,39 @@
 <script>
 // ─── WEB WORKER via Blob ───
 const workerCode = `
-  // Fallback instances if dynamic fetch fails
   const FALLBACK_INSTANCES = [
     'https://co.wuk.sh/',
     'https://cobalt.api.lolcat.host/',
     'https://cobalt.esmailelbob.xyz/',
     'https://cobalt.semoths.net/',
     'https://cobalt.lunar.icu/',
+    'https://cobalt-api.wen.run/',
+    'https://cobalt.drgns.space/',
   ];
 
-  // Fetch fresh working instances from community list
-  async function fetchInstances() {
-    try {
-      // Use allorigins proxy to bypass user-agent restriction on instances.cobalt.best
-      const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent('https://instances.cobalt.best/api/instances.json');
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
-      if (!res.ok) throw new Error('proxy failed');
-      const list = await res.json();
-      // Filter: online, no auth, cors enabled
-      const good = list
-        .filter(i => i.online && i.info && i.info.auth === false && i.info.cors === true)
-        .sort((a, b) => (b.score || 0) - (a.score || 0))
-        .slice(0, 6)
-        .map(i => i.protocol + '://' + i.api + '/');
-      if (good.length > 0) return good;
-    } catch (_) {}
+  // Try multiple CORS proxies to fetch the live instance list
+  async function fetchInstances(customInstance) {
+    if (customInstance) return [customInstance.endsWith('/') ? customInstance : customInstance + '/'];
+
+    const PROXIES = [
+      'https://api.allorigins.win/raw?url=',
+      'https://corsproxy.io/?',
+    ];
+    const TARGET = 'https://instances.cobalt.best/api/instances.json';
+
+    for (const proxy of PROXIES) {
+      try {
+        const res = await fetch(proxy + encodeURIComponent(TARGET), { signal: AbortSignal.timeout(6000) });
+        if (!res.ok) continue;
+        const list = await res.json();
+        const good = list
+          .filter(i => i.online && i.info && i.info.auth === false && i.info.cors === true)
+          .sort((a, b) => (b.score || 0) - (a.score || 0))
+          .slice(0, 8)
+          .map(i => (i.protocol || 'https') + '://' + i.api + '/');
+        if (good.length > 0) return good;
+      } catch (_) {}
+    }
     return FALLBACK_INSTANCES;
   }
 
@@ -804,67 +832,41 @@ const workerCode = `
       try {
         const res = await fetch(base, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(12000),
+          signal: AbortSignal.timeout(14000),
         });
+        if (res.status === 401 || res.status === 403) {
+          lastErr = 'auth_required:' + base;
+          continue;
+        }
         if (res.status === 400 || res.status === 422) {
           const t = await res.text();
-          lastErr = 'Error ' + res.status + ' from ' + base + ': ' + t.slice(0, 120);
-          continue; // try next instance
+          lastErr = t.slice(0, 200);
+          continue;
         }
-        if (res.status === 401 || res.status === 403) {
-          lastErr = 'Instance requires authentication: ' + base;
-          continue; // skip auth-required instances
-        }
-        return res; // return any other response (200, 500, etc.) for caller to handle
+        return res;
       } catch (e) {
         lastErr = e.message;
       }
     }
-    throw new Error(lastErr || 'All download instances failed');
+    throw new Error(lastErr || 'all_instances_failed');
   }
 
   self.onmessage = async function(e) {
-    const { url, quality, audioOnly, noWatermark, format } = e.data;
+    const { url, quality, audioOnly, noWatermark, format, customInstance } = e.data;
 
-    self.postMessage({ type: 'progress', msg: 'Detecting platform...' });
+    self.postMessage({ type: 'progress', msg: customInstance ? 'Using your instance...' : 'Searching for open servers...' });
 
-    // Build Cobalt v10 request body
-    const body = { url };
+    const instances = await fetchInstances(customInstance);
 
+    const body = { url, filenameStyle: 'pretty' };
     body.downloadMode = audioOnly ? 'audio' : 'auto';
-    body.filenameStyle = 'pretty';
-
-    if (quality && quality !== 'max') {
-      body.videoQuality = quality;
-    } else {
-      body.videoQuality = 'max';
-    }
-
-    if (format === 'mp4') {
-      body.youtubeVideoCodec = 'h264';
-    } else if (format === 'webm') {
-      body.youtubeVideoCodec = 'vp9';
-    }
-
-    if (noWatermark) {
-      body.tiktokFullAudio = true;   // grab higher-quality audio track (no TT watermark audio)
-      body.tiktokH265 = false;
-      body.disableMetadata = false;
-    }
-
-    if (audioOnly) {
-      body.audioFormat = 'mp3';
-      body.audioBitrate = '320';
-    }
-
-    self.postMessage({ type: 'progress', msg: 'Finding available servers...' });
-
-    const instances = await fetchInstances();
+    body.videoQuality = (quality && quality !== 'max') ? quality : 'max';
+    if (format === 'mp4') body.youtubeVideoCodec = 'h264';
+    else if (format === 'webm') body.youtubeVideoCodec = 'vp9';
+    if (noWatermark) { body.tiktokFullAudio = true; body.tiktokH265 = false; }
+    if (audioOnly) { body.audioFormat = 'mp3'; body.audioBitrate = '320'; }
 
     self.postMessage({ type: 'progress', msg: 'Contacting download service...' });
 
@@ -872,55 +874,35 @@ const workerCode = `
       const res = await tryCobalt(instances, body);
 
       if (!res.ok) {
-        let errMsg = 'Service returned error ' + res.status + '.';
-        try {
-          const errJson = await res.json();
-          if (errJson?.error?.code) errMsg = errJson.error.code;
-          else if (errJson?.text) errMsg = errJson.text;
-        } catch (_) {}
-        self.postMessage({ type: 'error', msg: errMsg + ' Try again or check the URL.' });
-        return;
-      }
-
-      const data = await res.json();
-
-      self.postMessage({ type: 'progress', msg: 'Processing response...' });
-
-      if (data.status === 'error') {
-        const errMsg = data.error?.code || 'Unknown error from service';
+        let errMsg = 'Service error ' + res.status;
+        try { const j = await res.json(); errMsg = j?.error?.code || j?.text || errMsg; } catch(_){}
         self.postMessage({ type: 'error', msg: errMsg });
         return;
       }
 
+      const data = await res.json();
+      self.postMessage({ type: 'progress', msg: 'Processing response...' });
+
+      if (data.status === 'error') {
+        self.postMessage({ type: 'error', msg: data.error?.code || 'Service error' });
+        return;
+      }
       if (data.status === 'tunnel' || data.status === 'redirect' || data.status === 'stream') {
-        self.postMessage({
-          type: 'success',
-          mode: 'single',
-          url: data.url,
-          filename: data.filename || 'video',
-          audio: audioOnly
-        });
+        self.postMessage({ type: 'success', mode: 'single', url: data.url, filename: data.filename || 'video', audio: audioOnly });
         return;
       }
-
       if (data.status === 'picker') {
-        self.postMessage({
-          type: 'success',
-          mode: 'picker',
-          picker: data.picker,
-          audio: data.audio,
-          filename: data.filename
-        });
+        self.postMessage({ type: 'success', mode: 'picker', picker: data.picker, audio: data.audio, filename: data.filename });
         return;
       }
-
-      self.postMessage({ type: 'error', msg: 'Unexpected response from service: ' + data.status });
+      self.postMessage({ type: 'error', msg: 'Unexpected response: ' + data.status });
 
     } catch (err) {
-      if (err.message && (err.message.includes('fetch') || err.message.includes('instances failed') || err.message.includes('Failed to fetch'))) {
-        self.postMessage({ type: 'error', msg: 'Network error. Make sure you have internet access, or all download servers may be temporarily unavailable.' });
+      const msg = err.message || '';
+      if (msg === 'all_instances_failed' || msg.includes('fetch') || msg.includes('Failed')) {
+        self.postMessage({ type: 'error', msg: 'no_open_instances' });
       } else {
-        self.postMessage({ type: 'error', msg: err.message || 'Unknown error occurred.' });
+        self.postMessage({ type: 'error', msg: msg || 'Unknown error' });
       }
     }
   };
@@ -1025,10 +1007,14 @@ function renderSuccess(data, platform) {
 }
 
 function renderError(msg) {
-  const friendly = msg.includes('link.unsupported') ? 'This URL is not supported. Try a direct video link.' :
-                   msg.includes('content.too_long') ? 'Video is too long. Try a shorter clip.' :
-                   msg.includes('fetch') ? 'Network error. Check your connection.' :
-                   msg;
+  const isNoInstances = msg === 'no_open_instances' || msg.includes('instances failed') || msg.includes('all_instances');
+  const friendly = isNoInstances
+    ? `All public download servers are currently blocking automated requests.<br><br>
+       <strong>Fix:</strong> Enter your own Cobalt instance URL in the field below, then try again.<br>
+       <a href="https://github.com/imputnet/cobalt/blob/main/docs/run-an-instance.md" target="_blank" style="color:var(--cyan)">→ How to run a free Cobalt instance (Railway/Render)</a>`
+    : msg.includes('link.unsupported') ? 'This URL is not supported. Try a direct video link.'
+    : msg.includes('content.too_long') ? 'Video is too long. Try a shorter clip.'
+    : msg;
   setStatus(`
     <div class="status-card error">
       <div class="status-icon error" style="font-size:1.4rem">✗</div>
@@ -1038,7 +1024,9 @@ function renderError(msg) {
       </div>
     </div>
   `);
-  showToast('❌ ' + friendly, 4000);
+  if (!isNoInstances) showToast('❌ ' + friendly, 4000);
+  // Show instance input on failure
+  document.getElementById('instanceWrap').classList.remove('hidden');
 }
 
 // ─── Main download logic ───
@@ -1065,6 +1053,7 @@ function startDownload() {
   const audioOnly = document.getElementById('audioOnly').checked;
   const noWatermark = document.getElementById('noWatermark').checked;
   const format = document.getElementById('formatSelect').value;
+  const customInstance = document.getElementById('customInstance').value.trim();
   const platform = detectPlatform(url);
 
   // Disable button
@@ -1103,7 +1092,7 @@ function startDownload() {
     resetBtn();
   };
 
-  worker.postMessage({ url, quality, audioOnly, noWatermark, format });
+  worker.postMessage({ url, quality, audioOnly, noWatermark, format, customInstance });
 }
 
 function resetBtn() {
