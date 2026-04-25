@@ -834,7 +834,7 @@ const workerCode = `
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(14000),
+          signal: AbortSignal.timeout(30000),
         });
         if (res.status === 401 || res.status === 403) {
           lastErr = 'auth_required:' + base;
@@ -899,7 +899,9 @@ const workerCode = `
 
     } catch (err) {
       const msg = err.message || '';
-      if (msg === 'all_instances_failed' || msg.includes('fetch') || msg.includes('Failed')) {
+      if (msg.includes('timed out') || msg.includes('TimeoutError')) {
+        self.postMessage({ type: 'error', msg: 'Request timed out. Your Railway instance may be cold-starting — wait 30 seconds and try again, or open the instance URL in your browser first to wake it up.' });
+      } else if (msg === 'all_instances_failed' || msg.includes('fetch') || msg.includes('Failed')) {
         self.postMessage({ type: 'error', msg: 'no_open_instances' });
       } else {
         self.postMessage({ type: 'error', msg: msg || 'Unknown error' });
